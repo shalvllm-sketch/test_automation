@@ -72,6 +72,16 @@
 
 <script>
 (function(){
+/* ===== expiry: page deactivates itself after this time ===== */
+const EXPIRES_AT=new Date('2026-11-26T23:00:00+05:30').getTime();
+function expiredCheck(){
+  if(Date.now()<EXPIRES_AT)return false;
+  try{localStorage.removeItem('nwtr_state_v2')}catch(e){}
+  document.body.innerHTML='<div style="font:16px system-ui;max-width:520px;margin:15vh auto;padding:0 16px;text-align:center"><h2>This test runner is no longer active.</h2><p>The testing window has closed. Please contact the test owner if you need access.</p></div>';
+  return true;
+}
+if(expiredCheck())return;
+setInterval(expiredCheck,15000);
 /* ===== hard-coded for QA ===== */
 const BOT_REF='b5de30a3-2ad4-43e7-a032-45d9be3ab362';
 const SCRIPT_URL='https://chatapps-qa-a.netomi.com/app/script.js';
