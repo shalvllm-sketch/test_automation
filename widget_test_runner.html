@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netomi Widget Test Runner</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#1c2230;--mut:#667085;--line:#e3e6ec;--acc:#4f46e5;--ok:#0f7b3f;--bad:#b42318;--warn:#a15c00}
+  @media (prefers-color-scheme:dark){:root{--bg:#12141a;--card:#1b1f29;--ink:#e8eaf0;--mut:#98a2b3;--line:#2b3140;--acc:#8b86ff;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:16px 16px 80px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--mut);margin:0 0 14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px;max-width:1000px}
+  .step{font-weight:600;margin-bottom:8px}
+  .step b{display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:var(--acc);color:#fff;font-size:12px;margin-right:6px}
+  button{padding:8px 16px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;cursor:pointer}
+  button.p{background:var(--acc);color:#fff;border-color:var(--acc)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .bar{height:8px;background:var(--line);border-radius:6px;overflow:hidden;margin:10px 0 4px}
+  .bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+  .stat{color:var(--mut);font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
+  .tw{max-height:380px;overflow:auto}
+  td.m{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
+  .OK{color:var(--ok);font-weight:600}.BAD{color:var(--bad);font-weight:600}.WARN{color:var(--warn);font-weight:600}
+  #log{height:140px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;margin-top:8px}
+  details summary{cursor:pointer;color:var(--mut)}
+  .err{color:var(--bad)}
+</style>
+</head>
+<body>
+<h1>Netomi Widget Test Runner</h1>
+<p class="sub">Upload your test sheet, run it, download the output with a conversation ID for every row. Keep this tab open and visible while it runs.</p>
+
+<div class="card">
+  <div class="step"><b>A</b>Upload the test file (.xlsx or .csv)</div>
+  <input type="file" id="file" accept=".xlsx,.xls,.csv">
+  <div class="stat" id="info" style="margin-top:6px">No file loaded.</div>
+</div>
+
+<div class="card">
+  <div class="step"><b>B</b>Run</div>
+  <div class="row">
+    <button class="p" id="start" disabled>▶ Run all test cases</button>
+    <button id="pause" disabled>⏸ Pause</button>
+    <button id="stop" disabled>■ Stop</button>
+    <button id="reset">Start over</button>
+  </div>
+  <div class="bar"><i id="prog"></i></div>
+  <div class="stat" id="status">Waiting for a file.</div>
+</div>
+
+<div class="card">
+  <div class="step"><b>C</b>Download the output file</div>
+  <div class="row">
+    <button class="p" id="xlsx" disabled>Download output (.xlsx)</button>
+    <button id="csv" disabled>Download output (.csv)</button>
+  </div>
+  <div class="stat" style="margin-top:6px">Contains every input column plus: Conversation ID, Run result, Run time. Works any time, even after Stop.</div>
+</div>
+
+<div class="card">
+  <div class="tw"><table id="tbl"><thead><tr><th>Case</th><th>First message</th><th>Conversation ID</th><th>Result</th></tr></thead><tbody></tbody></table></div>
+  <div class="stat" style="margin-top:8px">OK = conversation ID captured. NO_ID = widget gave no ID (find it in Transcripts by time). SAME_ID = widget reused the previous conversation.</div>
+</div>
+
+<div class="card"><details><summary>Troubleshooting log</summary><div id="log"></div></details></div>
+
+<script>
+(function(){
+/* ===== hard-coded for QA ===== */
+const BOT_REF='b5de30a3-2ad4-43e7-a032-45d9be3ab362';
+const SCRIPT_URL='https://chatapps-qa-a.netomi.com/app/script.js';
+const REPLY_WAIT=8, SETTLE=2, CONV_WAIT=10, END_WAIT=3;   // seconds
+const QUERY_COL='User query', CASE_COL='Test Conversation ID';
+const XLSX_LIB='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+/* ============================= */
+const $=id=>document.getElementById(id);
+const LS='nwtr_state_v2';
+let headers=[], rows=[], cases=[], results={}, idx=0, fname='';
+let running=false, paused=false, stopReq=false, widgetReady=false;
+let curConv='', lastCaseConv='', replySeq=0, replyEvents=false;
+const UUID=/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+function log(m){const el=$('log');el.textContent+=new Date().toISOString().slice(11,23)+'  '+m+'\n';el.scrollTop=el.scrollHeight}
+function save(auto){try{localStorage.setItem(LS,JSON.stringify({headers,rows,cases,results,idx,fname,lastCaseConv,auto:!!auto}))}catch(e){}}
+function setStatus(s){$('status').textContent=s}
+
+/* ---- conversation id capture ---- */
+function findKey(o,k,d){d=d||0;if(!o||typeof o!=='object'||d>6)return '';if(typeof o[k]==='string'&&UUID.test(o[k]))return o[k];
+  for(const x in o){const r=findKey(o[x],k,d+1);if(r)return r}return ''}
+function noteConv(id,src){if(id&&id!==curConv){curConv=id;log('conversationId -> '+id+'  ['+src+']')}}
+function onEvent(name,d){noteConv(findKey(d,'conversationId'),name);if(name==='VA_RESPONSE_RECEIVED'){replyEvents=true;replySeq++}}
+window.addEventListener('message',e=>{try{const d=typeof e.data==='string'?JSON.parse(e.data):e.data;if(!d||typeof d!=='object')return;
+  const id=findKey(d,'conversationId');if(id)noteConv(id,'postMessage')}catch(_){}});
+
+/* ---- widget ---- */
+function loadWidget(){
+  return new Promise((res,rej)=>{
+    if(widgetReady)return res();
+    const ns=document.createElement('script');ns.src=SCRIPT_URL;ns.type='text/javascript';ns.async=true;ns.setAttribute('botRefId',BOT_REF);
+    ns.onerror=()=>rej(new Error('Could not load the Netomi widget (check network/VPN).'));
+    ns.onload=()=>{const t0=Date.now();(function w(){
+      if(window.Netomi&&window.Netomi.chat&&window.Netomi.chat.init){
+        window.Netomi.chat.init(()=>{
+          ['ON_NEW_CONVERSATION','USER_MESSAGE_SENT','VA_RESPONSE_RECEIVED','USER_OPEN_WIDGET','END_CHAT_CONFIRM','CHAT_END_PILL'].forEach(ev=>{
+            try{window.Netomi.chat.subscribe(ev,d=>onEvent(ev,d))}catch(e){}});
+          widgetReady=true;log('widget ready');try{window.Netomi.chat.openWidget&&window.Netomi.chat.openWidget()}catch(e){}
+          setTimeout(res,2500)});
+      }else if(Date.now()-t0>20000)rej(new Error('Widget did not start within 20 seconds.'));else setTimeout(w,200)})()};
+    document.head.appendChild(ns);
+  });
+}
+const pub=(t,d)=>window.Netomi.chat.publish(t,d);
+
+/* ---- run ---- */
+async function runCase(c){
+  const n=c.id;const res={conv:'',result:'',time:new Date().toISOString().replace('T',' ').slice(0,19)};
+  for(let i=0;i<c.texts.length&&!stopReq;i++){
+    const text=c.texts[i];setStatus('Case '+n+' ('+(idx+1)+' of '+cases.length+'): sending "'+text.slice(0,50)+'"');
+    const rs=replySeq;pub('SEND_MESSAGE_IN_WIDGET',{text:text,label:text});log('sent: '+text);
+    if(i===0){const t0=Date.now();while(Date.now()-t0<CONV_WAIT*1000&&(!curConv||curConv===lastCaseConv)&&!stopReq)await sleep(250)}
+    if(replyEvents){const t0=Date.now();while(Date.now()-t0<REPLY_WAIT*1000&&replySeq===rs&&!stopReq)await sleep(250);await sleep(SETTLE*1000)}
+    else await sleep(REPLY_WAIT*1000);
+  }
+  setStatus('Case '+n+': ending chat');try{pub('END_SESSION')}catch(e){log('END_SESSION failed: '+e)}
+  await sleep(END_WAIT*1000);
+  res.conv=curConv;res.result=!res.conv?'NO_ID':(res.conv===lastCaseConv?'SAME_ID':'OK');
+  if(res.conv)lastCaseConv=res.conv;
+  return res;
+}
+function render(){
+  const tb=$('tbl').tBodies[0];tb.innerHTML='';
+  cases.forEach(c=>{const r=results[c.id];if(!r)return;const tr=tb.insertRow();
+    [c.id,c.texts[0],r.conv,r.result].forEach((v,i)=>{const td=tr.insertCell();td.textContent=v;if(i===2)td.className='m';
+      if(i===3)td.className=v==='OK'?'OK':(v==='SAME_ID'?'WARN':'BAD')})});
+  $('prog').style.width=(cases.length?Math.round(100*Object.keys(results).length/cases.length):0)+'%';
+  $('xlsx').disabled=$('csv').disabled=!Object.keys(results).length;
+  $('start').disabled=running||!cases.length;
+}
+async function loop(){
+  if(running)return;running=true;stopReq=false;paused=false;
+  $('start').disabled=true;$('pause').disabled=$('stop').disabled=false;
+  try{
+    setStatus('Loading the chat widget…');await loadWidget();
+    while(idx<cases.length&&!stopReq){
+      while(paused&&!stopReq)await sleep(300);
+      const c=cases[idx];results[c.id]=await runCase(c);idx++;render();save(false);
+      if(stopReq)break;
+      if(idx<cases.length){save(true);setStatus('Starting next case…');await sleep(500);location.reload();return}
+    }
+    setStatus(stopReq?'Stopped. You can still download the output.':'Done — '+cases.length+' test cases run. Download the output file (step C).');
+    if(!stopReq)log('finished');
+  }catch(e){setStatus('Error: '+e.message);log('ERROR '+(e.stack||e))}
+  running=false;$('pause').disabled=$('stop').disabled=true;render();save(false);
+}
+
+/* ---- upload ---- */
+function loadLib(){return new Promise((res,rej)=>{if(window.XLSX)return res();const s=document.createElement('script');s.src=XLSX_LIB;s.onload=res;
+  s.onerror=()=>rej(new Error('Could not load the spreadsheet library (needs internet access).'));document.head.appendChild(s)})}
+function setCases(){
+  const qi=headers.findIndex(h=>String(h).trim().toLowerCase()===QUERY_COL.toLowerCase());
+  const ci=headers.findIndex(h=>String(h).trim().toLowerCase()===CASE_COL.toLowerCase());
+  if(qi<0)throw new Error('Column "'+QUERY_COL+'" not found in the file.');
+  const g=new Map();
+  rows.forEach((r,ri)=>{const q=String(r[qi]==null?'':r[qi]).trim();if(!q)return;
+    const id=ci>=0&&String(r[ci]).trim()!==''?String(r[ci]).trim():String(ri+1);
+    if(!g.has(id))g.set(id,{id:id,texts:[],rowIdx:[]});const c=g.get(id);c.texts.push(q);c.rowIdx.push(ri)});
+  cases=[...g.values()];
+}
+$('file').onchange=async ev=>{
+  const f=ev.target.files[0];if(!f)return;
+  try{await loadLib();const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+    const a=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+    headers=a[0].map(String);rows=a.slice(1).filter(r=>r.some(x=>String(x).trim()!==''));fname=f.name;
+    setCases();results={};idx=0;lastCaseConv='';save(false);render();
+    $('info').className='stat';$('info').textContent=fname+': '+cases.length+' test cases, '+rows.length+' rows loaded.';
+    setStatus('Ready. Click "Run all test cases".');
+  }catch(e){$('info').className='err';$('info').textContent='Could not use this file: '+e.message}
+};
+
+/* ---- download ---- */
+function outTable(){
+  const resRow={};cases.forEach(c=>c.rowIdx.forEach(ri=>resRow[ri]=results[c.id]));
+  const H=headers.concat(['Conversation ID','Run result','Run time (UTC)']);
+  const body=rows.map((r,ri)=>{const x=resRow[ri]||{};return r.concat([x.conv||'',x.result||(results&&Object.keys(results).length?'NOT_RUN':''),x.time||''])});
+  return [H].concat(body);
+}
+function stamp(){return new Date().toISOString().replace(/[:T]/g,'-').slice(0,16)}
+function dl(name,blob){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
+function base(){return (fname||'tests').replace(/\.[^.]+$/,'')+'_OUTPUT_'+stamp()}
+$('xlsx').onclick=async()=>{try{await loadLib();const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(outTable()),'Output');XLSX.writeFile(wb,base()+'.xlsx')}catch(e){alert(e.message+' Use the .csv button.')}};
+$('csv').onclick=()=>{const q=v=>'"'+String(v).replace(/"/g,'""')+'"';dl(base()+'.csv',new Blob(['﻿'+outTable().map(r=>r.map(q).join(',')).join('\r\n')],{type:'text/csv'}))};
+
+$('start').onclick=loop;
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'▶ Resume':'⏸ Pause';setStatus(paused?'Paused.':'Running…')};
+$('stop').onclick=()=>{stopReq=true;paused=false};
+$('reset').onclick=()=>{if(confirm('Clear the loaded file and all results?')){try{localStorage.removeItem(LS)}catch(e){}location.reload()}};
+
+/* ---- resume after reload ---- */
+try{const s=JSON.parse(localStorage.getItem(LS)||'null');
+  if(s&&s.cases&&s.cases.length){headers=s.headers;rows=s.rows;cases=s.cases;results=s.results||{};idx=s.idx||0;fname=s.fname||'';lastCaseConv=s.lastCaseConv||'';
+    $('info').textContent=(fname||'Previous file')+': '+cases.length+' test cases, '+rows.length+' rows loaded.';
+    if(s.auto)setTimeout(loop,300);else setStatus(Object.keys(results).length?'Previous results kept. Download them, or click Run to continue.':'Ready. Click "Run all test cases".')}}catch(e){}
+render();
+})();
+</script>
+</body>
+</html>
